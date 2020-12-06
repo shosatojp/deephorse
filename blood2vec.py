@@ -15,10 +15,16 @@ class Blood2Vec(torch.nn.Module):
     def __init__(self, horse_count: int, ndim: int) -> None:
         super().__init__()
 
+        # number of horses (vocabularies)
         self.horse_count = horse_count
+
+        # latent code dim
         self.ndim = ndim
 
+        # 入力側Embedding
         self.embed = torch.nn.Embedding(horse_count, ndim)
+
+        # 出力側Embedding
         self.embed_out = torch.nn.Embedding(horse_count, ndim)
 
     def forward(self, x, target_id):
@@ -34,6 +40,8 @@ class HorsesDataset(Dataset):
         self.df = pd.read_csv(csvfile)
         self.size = self.df.shape[0]
         print('size = ', self.size)
+
+        # 祖先が見つからなかったもの（-1）は使わないけど、Embeddingの次元数には含める
         self.availables = self.df.loc[
             (self.df['ancestor_1'] != -1) &
             (self.df['ancestor_2'] != -1)
@@ -56,7 +64,7 @@ if __name__ == "__main__":
     os.makedirs(checkpoints_dir, exist_ok=True)
 
     epochs = 100
-    batch_size = 1000
+    batch_size = 10000
 
     dataset = HorsesDataset('horses.pedigree.csv')
     dataloader = DataLoader(dataset,
@@ -65,6 +73,7 @@ if __name__ == "__main__":
                             num_workers=os.cpu_count())
 
     device = 'cuda'
+    # device = 'cpu'
 
     net = Blood2Vec(dataset.size, 10)
     net.to(device)
@@ -73,7 +82,7 @@ if __name__ == "__main__":
     neg_count = 5
 
     lossfn = torch.nn.MSELoss()
-    optim = torch.optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+    optim = torch.optim.Adam(net.parameters(), lr=0.001)
 
     for epoch in range(epochs):
         for phase in ['train', 'val']:
@@ -93,17 +102,19 @@ if __name__ == "__main__":
 
                 with torch.set_grad_enabled(phase == 'train'):
                     # negative sampling
+                    # answers: positive なら target == 1, negative なら target == 0
                     neg_targets = torch.tensor(np.random.choice(dataset.availables, (targets.shape[0], neg_count)))
-                    # positive なら target == 1, negative なら target == 0
-                    pn_targets = (torch.cat([targets.reshape((-1, 1)), neg_targets], dim=1) ==
+                    pn_targets = torch.cat([targets.reshape((-1, 1)), neg_targets], dim=1)
+                    pn_answers = (pn_targets ==
                                   targets.view((*targets.shape, 1)).expand((*targets.shape, 1 + neg_count))).float()
+                    pn_targets = pn_targets.reshape((-1,))
+                    pn_answers = pn_answers.reshape((-1,))
+
                     pn_inputs = inputs.view((*inputs.shape, 1)).expand((*inputs.shape, 1 + neg_count))
                     pn_inputs = pn_inputs.transpose(1, 2).reshape((-1, inputs.shape[1]))
-                    pn_targets = pn_targets.reshape((-1, 1))
 
-                    out = net(inputs.to(device), targets.to(device))
-
-                    loss = lossfn(out, torch.ones((inputs.shape[0],)).to(device))
+                    out = net(pn_inputs.to(device), pn_targets.to(device))
+                    loss = lossfn(out, pn_answers.to(device))
 
                     if phase == 'train':
                         loss.backward()
