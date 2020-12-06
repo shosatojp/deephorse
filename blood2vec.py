@@ -34,6 +34,10 @@ class Blood2Vec(torch.nn.Module):
         a = torch.sum(a, dim=1)
         return a
 
+    def get_latent(self, x: torch.Tensor):
+        with torch.set_grad_enabled(False):
+            return self.embed(x)
+
 
 class HorsesDataset(Dataset):
     def __init__(self, csvfile) -> None:
@@ -78,6 +82,14 @@ if __name__ == "__main__":
     net = Blood2Vec(dataset.size, 10)
     net.to(device)
 
+    # === test ===
+    # net.load_state_dict(torch.load(os.path.join(checkpoints_dir, '00099.pkl')))
+    # a = net.get_latent(torch.tensor([0, 1, 2]).to(device))
+    # print(a)
+    # exit(0)
+
+    # === train ===
+
     # number of negative sample
     neg_count = 5
 
@@ -96,8 +108,6 @@ if __name__ == "__main__":
             inputs: torch.Tensor
             targets: torch.Tensor
             for inputs, targets in tqdm(dataloader):
-                total += inputs.shape[0]
-
                 optim.zero_grad()
 
                 with torch.set_grad_enabled(phase == 'train'):
@@ -120,6 +130,7 @@ if __name__ == "__main__":
                         loss.backward()
                         optim.step()
 
+                    total += pn_inputs.shape[0]
                     total_loss += loss.item() * inputs.shape[0]
 
             epoch_loss_rate = total_loss / total
