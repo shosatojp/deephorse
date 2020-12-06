@@ -2,5 +2,7 @@
 *.gz
 *.tar
 *.csv
+*.pkl
 
+checkpoints/
 cache/
