@@ -5,6 +5,8 @@ from tqdm import tqdm
 import os
 import numpy as np
 from torchviz import make_dot
+import itertools
+import functools
 
 
 class Blood2Vec(torch.nn.Module):
@@ -23,15 +25,27 @@ class Blood2Vec(torch.nn.Module):
 
         # 入力側Embedding
         self.embed = torch.nn.Embedding(horse_count, ndim)
+        int_range = 0.5 / self.ndim
+        self.embed.weight.data.uniform_(-int_range, int_range)
 
         # 出力側Embedding
         self.embed_out = torch.nn.Embedding(horse_count, ndim)
+        self.embed_out.weight.data.uniform_(-0, 0)
+
+        self.fc1 = torch.nn.Linear(2*ndim, ndim)
 
     def forward(self, x, target_id):
-        out = self.embed(x).sum(1)
+        out = self.embed(x)
+        out = out.reshape((out.shape[0], -1))
+
+        out = torch.relu(self.fc1(out))
+
         target = self.embed_out(target_id)
+
         a = torch.mul(out, target)
         a = torch.sum(a, dim=1)
+
+        a = torch.sigmoid(a)
         return a
 
     def get_latent(self, x: torch.Tensor):
@@ -46,29 +60,47 @@ class HorsesDataset(Dataset):
         print('size = ', self.size)
 
         # 祖先が見つからなかったもの（-1）は使わないけど、Embeddingの次元数には含める
+        self.ancestor_labels = list(filter(lambda e: e.startswith('ancestor_'),
+                                           self.df.columns))[:2]
         self.availables = self.df.loc[
-            (self.df['ancestor_1'] != -1) &
-            (self.df['ancestor_2'] != -1)
+            functools.reduce(lambda a, b: a & b,
+                             map(lambda label:self.df[label] != -1, self.ancestor_labels))
         ].index.to_numpy()
+
+        # prepare data on memory
+        data_path = 'data.pkl'
+        if os.path.exists(data_path):
+            self.data = torch.load(data_path)
+        else:
+            self.data = {}
+            for _id in self.availables:
+                row = self.df.loc[_id]
+                me = row[0]
+                context = torch.tensor(list(map(lambda label: row[label],
+                                                self.ancestor_labels)))
+                self.data[_id] = context, me
+            torch.save(self.data, data_path)
+
         print(f'number of available horses is {len(self.availables)}')
 
     def __getitem__(self, index: int):
-        row = self.df.loc[self.availables[index]]
-        me = row[0]
-        father = row['ancestor_1']
-        mother = row['ancestor_2']
-        return torch.tensor([father, mother]), me
+        return self.data[self.availables[index]]
 
     def __len__(self) -> int:
         return len(self.availables)
+
+
+def CachedDataset():
+    pass
 
 
 if __name__ == "__main__":
     checkpoints_dir = 'checkpoints'
     os.makedirs(checkpoints_dir, exist_ok=True)
 
-    epochs = 100
-    batch_size = 10000
+    epochs = 20
+    batch_size = 1000
+    latent_size = 20
 
     dataset = HorsesDataset('horses.pedigree.csv')
     dataloader = DataLoader(dataset,
@@ -79,7 +111,7 @@ if __name__ == "__main__":
     device = 'cuda'
     # device = 'cpu'
 
-    net = Blood2Vec(dataset.size, 10)
+    net = Blood2Vec(dataset.size, latent_size)
     net.to(device)
 
     # === test ===
@@ -92,12 +124,14 @@ if __name__ == "__main__":
 
     # number of negative sample
     neg_count = 5
+    pos_count = neg_count
 
-    lossfn = torch.nn.MSELoss()
+    lossfn = torch.nn.L1Loss()
     optim = torch.optim.Adam(net.parameters(), lr=0.001)
 
     for epoch in range(epochs):
-        for phase in ['train', 'val']:
+        for phase in ['train']:
+            # for phase in ['train', 'val']:
             if phase == 'train':
                 net.train()
             else:
@@ -110,18 +144,20 @@ if __name__ == "__main__":
             for inputs, targets in tqdm(dataloader):
                 optim.zero_grad()
 
-                with torch.set_grad_enabled(phase == 'train'):
-                    # negative sampling
-                    # answers: positive なら target == 1, negative なら target == 0
-                    neg_targets = torch.tensor(np.random.choice(dataset.availables, (targets.shape[0], neg_count)))
-                    pn_targets = torch.cat([targets.reshape((-1, 1)), neg_targets], dim=1)
-                    pn_answers = (pn_targets ==
-                                  targets.view((*targets.shape, 1)).expand((*targets.shape, 1 + neg_count))).float()
-                    pn_targets = pn_targets.reshape((-1,))
-                    pn_answers = pn_answers.reshape((-1,))
+                # negative sampling
+                # answers: positive なら target == 1, negative なら target == 0
+                neg_targets = torch.tensor(np.random.choice(dataset.availables, (targets.shape[0], neg_count)))
+                pos_targets = targets.view((*targets.shape, 1)).expand((*targets.shape, pos_count))
+                pn_targets = torch.cat([pos_targets, neg_targets], dim=1)
+                pn_answers = (pn_targets ==
+                              targets.view((*targets.shape, 1)).expand((*targets.shape, pos_count + neg_count))).float()
+                pn_targets = pn_targets.reshape((-1,))
+                pn_answers = pn_answers.reshape((-1,))
 
-                    pn_inputs = inputs.view((*inputs.shape, 1)).expand((*inputs.shape, 1 + neg_count))
-                    pn_inputs = pn_inputs.transpose(1, 2).reshape((-1, inputs.shape[1]))
+                pn_inputs = inputs.view((*inputs.shape, 1)).expand((*inputs.shape, pos_count + neg_count))
+                pn_inputs = pn_inputs.transpose(1, 2).reshape((-1, inputs.shape[1]))
+
+                with torch.set_grad_enabled(phase == 'train'):
 
                     out = net(pn_inputs.to(device), pn_targets.to(device))
                     loss = lossfn(out, pn_answers.to(device))
@@ -131,10 +167,11 @@ if __name__ == "__main__":
                         optim.step()
 
                     total += pn_inputs.shape[0]
-                    total_loss += loss.item() * inputs.shape[0]
+                    total_loss += loss.item() * pn_inputs.shape[0]
 
             epoch_loss_rate = total_loss / total
             print(epoch + 1, phase, epoch_loss_rate)
+            print(out, torch.max(out))
 
         if (epoch + 1) % 10 == 0:
             torch.save(net.state_dict(), os.path.join(checkpoints_dir, f'{epoch:05d}.pkl'))
