@@ -3,6 +3,7 @@
 *.tar
 *.csv
 *.pkl
+*.png
 
 checkpoints/
 cache/

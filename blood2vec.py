@@ -4,8 +4,6 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import os
 import numpy as np
-from torchviz import make_dot
-import itertools
 import functools
 import matplotlib.pyplot as plt
 
@@ -33,12 +31,13 @@ class Blood2Vec(torch.nn.Module):
         self.embed_out = torch.nn.Embedding(horse_count, ndim)
         self.embed_out.weight.data.uniform_(-0, 0)
 
-        self.fc1 = torch.nn.Linear(2*ndim, ndim)
+        self.fc1 = torch.nn.Linear(6*ndim, ndim)
 
     def forward(self, x, target_id):
         out = self.embed(x)
-        out = out.reshape((out.shape[0], -1))
+        # out = out.sum(dim = 1)
 
+        out = out.reshape((out.shape[0], -1))
         out = torch.relu(self.fc1(out))
 
         target = self.embed_out(target_id)
@@ -62,37 +61,23 @@ class HorsesDataset(Dataset):
 
         # 祖先が見つからなかったもの（-1）は使わないけど、Embeddingの次元数には含める
         self.ancestor_labels = list(filter(lambda e: e.startswith('ancestor_'),
-                                           self.df.columns))[:2]
+                                           self.df.columns))[:6]
         self.availables = self.df.loc[
             functools.reduce(lambda a, b: a & b,
                              map(lambda label:self.df[label] != -1, self.ancestor_labels))
         ].index.to_numpy()
 
-        # prepare data on memory
-        data_path = 'data.pkl'
-        if os.path.exists(data_path):
-            self.data = torch.load(data_path)
-        else:
-            self.data = {}
-            for _id in self.availables:
-                row = self.df.loc[_id]
-                me = row[0]
-                context = torch.tensor(list(map(lambda label: row[label],
-                                                self.ancestor_labels)))
-                self.data[_id] = context, me
-            torch.save(self.data, data_path)
+        self.context = torch.tensor(np.array(self.df[self.ancestor_labels].loc[self.availables]))
 
         print(f'number of available horses is {len(self.availables)}')
 
     def __getitem__(self, index: int):
-        return self.data[self.availables[index]]
+        me = self.availables[index]
+        context = self.context[index]
+        return context, me
 
     def __len__(self) -> int:
         return len(self.availables)
-
-
-def CachedDataset():
-    pass
 
 
 if __name__ == "__main__":
@@ -101,7 +86,7 @@ if __name__ == "__main__":
 
     epochs = 20
     batch_size = 1000
-    latent_size = 20
+    latent_size = 30
 
     dataset = HorsesDataset('horses.pedigree.csv')
     dataloader = DataLoader(dataset,
@@ -113,15 +98,15 @@ if __name__ == "__main__":
     # device = 'cpu'
 
     # figure
-    fig = plt.figure()
-    fig.suptitle('loss and acc')
+    fig = plt.figure(figsize=(12., 6.))
+    fig.suptitle('loss and accuracy')
     ax_loss = fig.add_subplot(1, 2, 1)
     ax_acc = fig.add_subplot(1, 2, 2)
     ax_loss.set_title('loss')
     ax_loss.set_xlabel('epochs')
-    ax_loss.set_ylabel('loss')
-    ax_acc.set_title('acc')
-    ax_acc.set_ylabel('acc')
+    ax_loss.set_ylabel('l1 loss')
+    ax_acc.set_title('accuracy')
+    ax_acc.set_ylabel('accuracy')
     ax_acc.set_xlabel('epochs')
 
     loss_history, acc_history = [], []
@@ -130,7 +115,7 @@ if __name__ == "__main__":
     net.to(device)
 
     # === test ===
-    # net.load_state_dict(torch.load(os.path.join(checkpoints_dir, '00099.pkl')))
+    # net.load_state_dict(torch.load(os.path.join(checkpoints_dir, '00019.pkl')))
     # a = net.get_latent(torch.tensor([0, 1, 2]).to(device))
     # print(a)
     # exit(0)
@@ -144,7 +129,7 @@ if __name__ == "__main__":
     lossfn = torch.nn.L1Loss()
     optim = torch.optim.Adam(net.parameters(), lr=0.001)
 
-    for epoch in range(epochs):
+    for epoch in range(1, 1 + epochs):
         for phase in ['train']:
             # for phase in ['train', 'val']:
             if phase == 'train':
@@ -166,17 +151,24 @@ if __name__ == "__main__":
                 pos_targets = targets.view((*targets.shape, 1)).expand((*targets.shape, pos_count))
                 pn_targets = torch.cat([pos_targets, neg_targets], dim=1)
                 pn_answers = (pn_targets ==
-                              targets.view((*targets.shape, 1)).expand((*targets.shape, pos_count + neg_count))).float()
+                              targets.view((*targets.shape, 1)).expand((*targets.shape, pos_count + neg_count)))
                 pn_targets = pn_targets.reshape((-1,))
                 pn_answers = pn_answers.reshape((-1,))
 
                 pn_inputs = inputs.view((*inputs.shape, 1)).expand((*inputs.shape, pos_count + neg_count))
                 pn_inputs = pn_inputs.transpose(1, 2).reshape((-1, inputs.shape[1]))
 
+                # randomise
+                inputs_targets_answers = torch.cat([pn_inputs, pn_targets.view(-1, 1), pn_answers.view(-1, 1).long()], dim=1)
+                inputs_targets_answers = inputs_targets_answers[torch.randperm(inputs_targets_answers.shape[0])]
+                pn_inputs = inputs_targets_answers[:, :-2]
+                pn_targets = inputs_targets_answers[:, -2]
+                pn_answers = inputs_targets_answers[:, -1]
+
                 with torch.set_grad_enabled(phase == 'train'):
 
                     out = net(pn_inputs.to(device), pn_targets.to(device))
-                    loss = lossfn(out, pn_answers.to(device))
+                    loss = lossfn(out, pn_answers.float().to(device))
                     # lossが0.5以下なら正解
                     acc = (torch.sum(loss) < 0.5).item() / torch.numel(loss)
 
@@ -193,11 +185,13 @@ if __name__ == "__main__":
             acc_per_input = total_acc / total
             loss_history.append(loss_per_input)
             acc_history.append(acc_per_input)
-            print(epoch + 1, phase, loss_per_input, acc_per_input)
+            print(f'epoch = {epoch}, phase = {phase}, loss = {loss_per_input: .2g}, acc = {acc_per_input: .2g}')
             ax_loss.plot(np.array(loss_history), color='red')
             ax_acc.plot(np.array(acc_history), color='green')
             plt.draw()
             plt.pause(0.01)
+        # print(out)
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch) % 10 == 0:
             torch.save(net.state_dict(), os.path.join(checkpoints_dir, f'{epoch:05d}.pkl'))
+    plt.savefig('loss_acc.png')
