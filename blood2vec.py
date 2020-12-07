@@ -112,15 +112,33 @@ if __name__ == "__main__":
     loss_history, acc_history = [], []
 
     net = Blood2Vec(dataset.size, latent_size)
-    net.to(device)
 
     # === test ===
-    # net.load_state_dict(torch.load(os.path.join(checkpoints_dir, '00019.pkl')))
-    # a = net.get_latent(torch.tensor([0, 1, 2]).to(device))
-    # print(a)
-    # exit(0)
+    test = True
+    if test:
+        net.load_state_dict(torch.load(os.path.join(checkpoints_dir, '00019.pkl')))
+        target = net.get_latent(torch.tensor([0]))
+        latent_table = net.get_latent(torch.tensor(dataset.availables))
+
+        # 類似度
+        diff = latent_table - target.expand(latent_table.shape)
+        print(diff.shape)
+        mul = diff * diff
+        mul = torch.sum(mul, dim=1)
+
+        print(mul.shape)
+
+        root = torch.sqrt(mul)
+
+        arg = torch.argsort(root, dim=0)
+        print(dataset.df.loc[dataset.availables[arg]])
+        print(arg[:10])
+        print(root[arg[:10]])
+
+        exit(0)
 
     # === train ===
+    net.to(device)
 
     # number of negative sample
     neg_count = 5
