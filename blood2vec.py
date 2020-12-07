@@ -7,6 +7,7 @@ import numpy as np
 from torchviz import make_dot
 import itertools
 import functools
+import matplotlib.pyplot as plt
 
 
 class Blood2Vec(torch.nn.Module):
@@ -111,6 +112,20 @@ if __name__ == "__main__":
     device = 'cuda'
     # device = 'cpu'
 
+    # figure
+    fig = plt.figure()
+    fig.suptitle('loss and acc')
+    ax_loss = fig.add_subplot(1, 2, 1)
+    ax_acc = fig.add_subplot(1, 2, 2)
+    ax_loss.set_title('loss')
+    ax_loss.set_xlabel('epochs')
+    ax_loss.set_ylabel('loss')
+    ax_acc.set_title('acc')
+    ax_acc.set_ylabel('acc')
+    ax_acc.set_xlabel('epochs')
+
+    loss_history, acc_history = [], []
+
     net = Blood2Vec(dataset.size, latent_size)
     net.to(device)
 
@@ -137,6 +152,7 @@ if __name__ == "__main__":
             else:
                 net.eval()
             total_loss = .0
+            total_acc = .0
             total = 0
 
             inputs: torch.Tensor
@@ -161,6 +177,8 @@ if __name__ == "__main__":
 
                     out = net(pn_inputs.to(device), pn_targets.to(device))
                     loss = lossfn(out, pn_answers.to(device))
+                    # lossが0.5以下なら正解
+                    acc = (torch.sum(loss) < 0.5).item() / torch.numel(loss)
 
                     if phase == 'train':
                         loss.backward()
@@ -168,10 +186,18 @@ if __name__ == "__main__":
 
                     total += pn_inputs.shape[0]
                     total_loss += loss.item() * pn_inputs.shape[0]
+                    total_acc += acc * pn_inputs.shape[0]
 
-            epoch_loss_rate = total_loss / total
-            print(epoch + 1, phase, epoch_loss_rate)
-            print(out, torch.max(out))
+            # logging
+            loss_per_input = total_loss / total
+            acc_per_input = total_acc / total
+            loss_history.append(loss_per_input)
+            acc_history.append(acc_per_input)
+            print(epoch + 1, phase, loss_per_input, acc_per_input)
+            ax_loss.plot(np.array(loss_history), color='red')
+            ax_acc.plot(np.array(acc_history), color='green')
+            plt.draw()
+            plt.pause(0.01)
 
         if (epoch + 1) % 10 == 0:
             torch.save(net.state_dict(), os.path.join(checkpoints_dir, f'{epoch:05d}.pkl'))
